@@ -1,0 +1,27 @@
+services:
+  ros-humble-unitree-teleop3:
+    build:
+      context: .  # Assuming the Dockerfile is in the current directory
+      dockerfile: Dockerfile
+    volumes:
+      - /home/hanyu/Codes/avp_teleoperate:/workspace
+      - /home/hanyu/Codes/avp_teleoperate/unitree_sdk2_python:/workspace/unitree_sdk2_python
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    privileged: true
+    cap_add:
+      - SYS_PTRACE
+    shm_size: 6g
+    environment:
+      - ROS_DOMAIN_ID=0
+      - DISPLAY=$DISPLAY
+    network_mode: host
+    user: teleophost
+    stdin_open: true
+    tty: true
+    command: ["tail", "-f", "/dev/null"]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+    #           count: all
