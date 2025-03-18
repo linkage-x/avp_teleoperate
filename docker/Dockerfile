@@ -3,11 +3,11 @@ FROM osrf/ros:humble-desktop-jammy
 #important, otherwise may cause poor priviledge
 USER root
 
-RUN apt update
 COPY sources.list /etc/apt/sources.list
+RUN apt update
 
 # install ros2 packages
-RUN apt update && apt install -y --no-install-recommends \
+RUN apt install -y --no-install-recommends \
     ros-humble-desktop-full
 
 RUN mkdir -p /home/teleophost/.pip
@@ -63,21 +63,25 @@ RUN if ! getent passwd teleophost >/dev/null; then \
     useradd -create-home -u 1000 -g teleophost -m teleophost || useradd -create-home -g teleophost -m teleophost; \
     fi
 
+
+RUN apt install -y usbutils vim udev
+RUN /lib/systemd/systemd-udevd --daemon
+
+
+####################################
+# adb devices
+# * daemon not running; starting now at tcp:5037
+# * daemon started successfully
+# List of devices attached
+# 2G0YC5ZGC900XR  unauthorized
+####################################
+
+RUN mkdir -p /home/teleophost/.local/lib
+RUN apt install libnss3-tools
+
 # 给 teleophost 用户 root 权限
 RUN usermod -aG sudo teleophost && echo "teleophost ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 USER teleophost
-
-RUN chown -R teleophost:teleophost /home/teleophost /workspace
-RUN mkdir -p /home/teleophost/.local/lib
-RUN pip3 install --no-cache-dir cyclonedds==0.10.2 opencv-python pinocchio meshcat casadi
-# 设置工作目录
-WORKDIR /workspace/unitree_sdk2_python
-RUN pip install -e /workspace/unitree_sdk2_python
-
-WORKDIR /workspace
-RUN pip install -r requirements.txt
-
-RUN apt install libnss3-tools
 
 #############################
 # # 安装mkcert
@@ -103,3 +107,28 @@ COPY --chown=teleophost . .
 ENV PATH="/home/teleophost/.local/bin:$PATH"
 ENV NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=all
 
+
+# post process
+# sudo chown -R teleophost:teleophost /home/teleophost /workspace
+
+# pip3 install --no-cache-dir cyclonedds==0.10.2 opencv-python pinocchio meshcat casadi
+# # 设置工作目录
+# pip install -e /workspace/unitree_sdk2_python
+
+# cd /workspace
+# pip install -r requirements.txt
+
+#sudo vim /etc/udev/rules.d/51-android.rules
+#SUBSYSTEM=="usb", ATTR{idVendor}=="2833", MODE="0666", GROUP="plugdev"
+
+# cat /etc/udev/rules.d/51-android.rules | grep Quest
+# lsusb | grep Quest
+# sudo udevadm control --reload-rules
+# sudo udevadm trigger
+# cd /workspace/platform-tools
+# sudo ./adb start-server
+
+# [host run] ./adb devices，并且quest使用主账户登陆，才有弹窗,从而进入开发者模式
+# sudo ./adb devices
+
+# [host run] sudo ufw allow 8012 防火墙允许8012的端口
