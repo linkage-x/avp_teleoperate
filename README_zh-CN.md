@@ -182,6 +182,7 @@ unitree@Host:~$ conda activate tv
 
 ```bash
 # 提醒1：可以通过scp命令将image_server.py传输到PC2，然后使用ssh远程登录PC2后执行它。
+# passwd: 123
 # 假设开发计算单元PC2的ip地址为192.168.123.164，那么传输过程示例如下：
 # 先ssh登录PC2，创建图像服务器的文件夹
 (tv) unitree@Host:~$ ssh unitree@192.168.123.164 "mkdir -p ~/image_server"

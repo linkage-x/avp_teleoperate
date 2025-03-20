@@ -1,5 +1,5 @@
 services:
-  ros-humble-unitree-teleop3:
+  quest3-unitree-teleop:
     build:
       context: .  # Assuming the Dockerfile is in the current directory
       dockerfile: Dockerfile
