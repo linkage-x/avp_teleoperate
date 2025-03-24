@@ -31,7 +31,7 @@ kTopicDex3RightState = "rt/dex3/right/state"
 
 class Dex3_1_Controller:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False):
+                       dual_hand_action_array = None, dual_hand_sensor_array = None, fps = 100.0, Unit_Test = False):
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
 
@@ -44,6 +44,8 @@ class Dex3_1_Controller:
         dual_hand_state_array: [output] Return left(7), right(7) hand motor state
 
         dual_hand_action_array: [output] Return left(7), right(7) hand motor action
+
+        dual_hand_sensor_array: [output] Return left(7), right(7) hand sensor data
 
         fps: Control frequency
 
@@ -73,6 +75,7 @@ class Dex3_1_Controller:
         # Shared Arrays for hand states
         self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)  
         self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
+        self.dual_hand_sensor_array = dual_hand_sensor_array  # Shared array for sensor data
 
         # initialize subscribe thread
         self.subscribe_state_thread = threading.Thread(target=self._subscribe_hand_state)
@@ -86,7 +89,7 @@ class Dex3_1_Controller:
             print("[Dex3_1_Controller] Waiting to subscribe dds...")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array))
+                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dual_hand_sensor_array))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -103,6 +106,11 @@ class Dex3_1_Controller:
                 # Update right hand state
                 for idx, id in enumerate(Dex3_1_Right_JointIndex):
                     self.right_hand_state_array[idx] = right_hand_msg.motor_state[id].q
+                # Update sensor data
+                if self.dual_hand_sensor_array:
+                    with self.dual_hand_data_lock:
+                        self.dual_hand_sensor_array[:7] = [sensor.pressure for sensor in left_hand_msg.press_sensor_state]
+                        self.dual_hand_sensor_array[7:] = [sensor.pressure for sensor in right_hand_msg.press_sensor_state]
             time.sleep(0.002)
     
     class _RIS_Mode:
@@ -130,7 +138,8 @@ class Dex3_1_Controller:
         # print("hand ctrl publish ok.")
     
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
+                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None,
+                              dual_hand_sensor_array = None):
         self.running = True
 
         left_q_target  = np.full(Dex3_Num_Motors, 0)
@@ -195,6 +204,12 @@ class Dex3_1_Controller:
                     with dual_hand_data_lock:
                         dual_hand_state_array[:] = state_data
                         dual_hand_action_array[:] = action_data
+
+                if dual_hand_sensor_array:
+                    with dual_hand_data_lock:
+                        sensor_data = np.array(dual_hand_sensor_array[:])
+                        # Use sensor_data as needed
+                        # TODO: 判断接触力是否超过阈值，超过则保持当前力度，否则增加力度
 
                 self.ctrl_dual_hand(left_q_target, right_q_target)
                 current_time = time.time()
@@ -436,7 +451,8 @@ if __name__ == "__main__":
         dual_hand_data_lock = Lock()
         dual_hand_state_array = Array('d', 14, lock=False)  # current left, right hand state(14) data.
         dual_hand_action_array = Array('d', 14, lock=False) # current left, right hand action(14) data.
-        hand_ctrl = Dex3_1_Controller(left_hand_array, right_hand_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, Unit_Test = True)
+        dual_hand_sensor_array = Array('d', 14, lock=False) # current left, right hand sensor(14) data.
+        hand_ctrl = Dex3_1_Controller(left_hand_array, right_hand_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dual_hand_sensor_array, Unit_Test = True)
     else:
         left_hand_array = Array('d', 75, lock=True)
         right_hand_array = Array('d', 75, lock=True)
