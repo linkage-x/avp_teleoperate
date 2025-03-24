@@ -94,7 +94,7 @@ if __name__ == '__main__':
         dual_hand_data_lock = Lock()
         dual_hand_state_array = Array('d', 14, lock = False)  # [output] current left, right hand state(14) data.
         dual_hand_action_array = Array('d', 14, lock = False) # [output] current left, right hand action(14) data.
-        dual_hand_sensor_array = Array('d', 14, lock = False) # [output] current left, right hand sensor(14) data.
+        dual_hand_sensor_array = Array('d', 12, lock = False) # [output] current left, right fingers sensor(12) data.
         hand_ctrl = Dex3_1_Controller(left_hand_array, right_hand_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dual_hand_sensor_array)
     elif args.hand == "gripper":
         left_hand_array = Array('d', 75, lock=True)

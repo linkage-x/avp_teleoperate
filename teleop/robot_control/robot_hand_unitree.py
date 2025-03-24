@@ -45,7 +45,7 @@ class Dex3_1_Controller:
 
         dual_hand_action_array: [output] Return left(7), right(7) hand motor action
 
-        dual_hand_sensor_array: [output] Return left(7), right(7) hand sensor data
+        dual_hand_sensor_array: [output] Return left(6), right(6) finger sensor data
 
         fps: Control frequency
 
@@ -97,7 +97,7 @@ class Dex3_1_Controller:
 
     def _subscribe_hand_state(self):
         while True:
-            left_hand_msg  = self.LeftHandState_subscriber.Read()
+            left_hand_msg = self.LeftHandState_subscriber.Read()
             right_hand_msg = self.RightHandState_subscriber.Read()
             if left_hand_msg is not None and right_hand_msg is not None:
                 # Update left hand state
@@ -109,8 +109,16 @@ class Dex3_1_Controller:
                 # Update sensor data
                 if self.dual_hand_sensor_array:
                     with self.dual_hand_data_lock:
-                        self.dual_hand_sensor_array[:7] = [sensor.pressure for sensor in left_hand_msg.press_sensor_state]
-                        self.dual_hand_sensor_array[7:] = [sensor.pressure for sensor in right_hand_msg.press_sensor_state]
+                        # Extract pressure data for thumb and index fingers
+                        thumb_left = left_hand_msg.press_sensor_state[1].pressure
+                        index_left = left_hand_msg.press_sensor_state[5].pressure
+                        self.dual_hand_sensor_array[:3] = thumb_left[3], thumb_left[6], thumb_left[8]
+                        self.dual_hand_sensor_array[3:6] = index_left[3], index_left[6], index_left[8]
+
+                        thumb_right = right_hand_msg.press_sensor_state[1].pressure
+                        index_right = right_hand_msg.press_sensor_state[5].pressure
+                        self.dual_hand_sensor_array[6:9] = thumb_right[3], thumb_right[6], thumb_right[8]
+                        self.dual_hand_sensor_array[9:12] = index_right[3], index_right[6], index_right[8]
             time.sleep(0.002)
     
     class _RIS_Mode:
@@ -145,6 +153,9 @@ class Dex3_1_Controller:
         left_q_target  = np.full(Dex3_Num_Motors, 0)
         right_q_target = np.full(Dex3_Num_Motors, 0)
 
+        left_q_target_prev  = np.full(Dex3_Num_Motors, 0)
+        right_q_target_prev = np.full(Dex3_Num_Motors, 0)
+
         q = 0.0
         dq = 0.0
         tau = 0.0
@@ -175,6 +186,8 @@ class Dex3_1_Controller:
             self.right_msg.motor_cmd[id].kp   = kp
             self.right_msg.motor_cmd[id].kd   = kd  
 
+        FORCE_THRESHOLD = 11 # TODO: Need to be adjusted
+        FORCE_THRESHOLD = FORCE_THRESHOLD * 10000
         try:
             while self.running:
                 start_time = time.time()
@@ -195,9 +208,36 @@ class Dex3_1_Controller:
                     ref_right_value[1] = ref_right_value[1] * 1.05
                     ref_right_value[2] = ref_right_value[2] * 0.95
 
-                    left_q_target  = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
-                    right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+                    if dual_hand_sensor_array:
+                        with dual_hand_data_lock:
+                            sensor_data = np.array(dual_hand_sensor_array[:])
+                            print(f"[DEBUG] Sensor data: {sensor_data}")  # Debugging sensor data
+                            # Calculate scaling factor based on force threshold
+                            max_force = np.max(sensor_data)
+                            if max_force > FORCE_THRESHOLD:
+                                scaling_factor = max(0, 1 - (max_force - FORCE_THRESHOLD) / FORCE_THRESHOLD)
+                                print(f"[DEBUG] Force threshold exceeded. Scaling factor: {scaling_factor}")
+                            else:
+                                scaling_factor = 1.0
+                                print(f"[DEBUG] Force below threshold. Scaling factor: {scaling_factor}")
 
+                            left_q_target = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+                            right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+
+                            # Check if left_q_target_prev is all zeros
+                            if np.all(np.isclose(left_q_target_prev, 0, atol=1e-6)):
+                                left_q_target_prev = left_q_target
+
+                            # Check if right_q_target_prev is all zeros
+                            if np.all(np.isclose(right_q_target_prev, 0, atol=1e-6)):
+                                right_q_target_prev = right_q_target
+
+                            # Scale the target positions
+                            left_q_target = scaling_factor * left_q_target + (1 - scaling_factor) * left_q_target_prev
+                            right_q_target = scaling_factor * right_q_target + (1 - scaling_factor) * right_q_target_prev
+
+                            left_q_target_prev = left_q_target
+                            right_q_target_prev = right_q_target
                 # get dual hand action
                 action_data = np.concatenate((left_q_target, right_q_target))    
                 if dual_hand_state_array and dual_hand_action_array:
@@ -205,17 +245,17 @@ class Dex3_1_Controller:
                         dual_hand_state_array[:] = state_data
                         dual_hand_action_array[:] = action_data
 
-                if dual_hand_sensor_array:
-                    with dual_hand_data_lock:
-                        sensor_data = np.array(dual_hand_sensor_array[:])
-                        # Use sensor_data as needed
-                        # TODO: 判断接触力是否超过阈值，超过则保持当前力度，否则增加力度
+                # Debugging target values
+                print(f"[DEBUG] Left q target: {left_q_target}")
+                print(f"[DEBUG] Right q target: {right_q_target}")
 
                 self.ctrl_dual_hand(left_q_target, right_q_target)
                 current_time = time.time()
                 time_elapsed = current_time - start_time
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
+        except Exception as e:
+            print(f"[ERROR] Exception in control_process: {e}")
         finally:
             print("Dex3_1_Controller has been closed.")
 
@@ -451,7 +491,7 @@ if __name__ == "__main__":
         dual_hand_data_lock = Lock()
         dual_hand_state_array = Array('d', 14, lock=False)  # current left, right hand state(14) data.
         dual_hand_action_array = Array('d', 14, lock=False) # current left, right hand action(14) data.
-        dual_hand_sensor_array = Array('d', 14, lock=False) # current left, right hand sensor(14) data.
+        dual_hand_sensor_array = Array('d', 12, lock=False) # current left, right hand sensor(12) data.
         hand_ctrl = Dex3_1_Controller(left_hand_array, right_hand_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dual_hand_sensor_array, Unit_Test = True)
     else:
         left_hand_array = Array('d', 75, lock=True)
