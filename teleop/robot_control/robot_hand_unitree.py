@@ -16,6 +16,7 @@ import threading
 from multiprocessing import Process, shared_memory, Array, Lock
 import matplotlib.pyplot as plt
 from scipy import signal
+import cvxpy as cp  # Add this for MPC
 
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(parent2_dir)
@@ -145,6 +146,10 @@ class Dex3_1_Controller:
         self.right_pid = PIDController(kp=1.0, ki=0, kd=0)  # Right hand PID controller
         self.target_force = 11 * 10000  # Target force threshold for both hands
 
+        self.mpc_horizon = 10  # Prediction horizon for MPC
+        self.mpc_dt = 1 / self.fps  # Time step for MPC
+        self.right_mpc_initialized = False  # Flag to initialize MPC variables
+
         print("Initialize Dex3_1_Controller OK!\n")
 
     def _subscribe_hand_state(self):
@@ -197,6 +202,30 @@ class Dex3_1_Controller:
         self.RightHandCmb_publisher.Write(self.right_msg)
         # print("hand ctrl publish ok.")
     
+    def _initialize_right_mpc(self):
+        """Initialize MPC variables for the right hand."""
+        n = Dex3_Num_Motors  # Number of motors
+        self.u = cp.Variable((n, self.mpc_horizon))  # Control inputs
+        self.x = cp.Variable((n, self.mpc_horizon + 1))  # States
+        self.x_ref = cp.Parameter((n, self.mpc_horizon + 1))  # Reference trajectory
+        self.x_init = cp.Parameter(n)  # Initial state
+        self.sensor_ref = cp.Parameter(6)  # Reference sensor values (e.g., target pressures)
+
+        # Define cost function (e.g., minimize tracking error, control effort, and sensor error)
+        cost = (
+            cp.sum_squares(self.x[:, 1:] - self.x_ref[:, 1:]) +  # State tracking error
+            0.1 * cp.sum_squares(self.u) +                      # Control effort
+            0.5 * cp.sum_squares(self.sensor_ref - self.sensor_data)  # Sensor error
+        )
+        constraints = [self.x[:, 0] == self.x_init]  # Initial state constraint
+        for t in range(self.mpc_horizon):
+            constraints += [
+                self.x[:, t + 1] == self.x[:, t] + self.mpc_dt * self.u[:, t],  # Dynamics
+                cp.abs(self.u[:, t]) <= 1.0,  # Control input limits
+            ]
+        self.mpc_problem = cp.Problem(cp.Minimize(cost), constraints)
+        self.right_mpc_initialized = True
+
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
                               dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None,
                               dual_hand_sensor_array = None):
@@ -238,12 +267,19 @@ class Dex3_1_Controller:
             self.right_msg.motor_cmd[id].kp   = kp
             self.right_msg.motor_cmd[id].kd   = kd  
 
+        if not self.right_mpc_initialized:
+            self._initialize_right_mpc()
+
         try:
             while self.running:
                 start_time = time.time()
                 # get dual hand state
                 left_hand_mat  = np.array(left_hand_array[:]).reshape(25, 3).copy()
                 right_hand_mat = np.array(right_hand_array[:]).reshape(25, 3).copy()
+
+                # Ensure default values for ref_right_value and ref_left_value
+                ref_left_value = np.zeros((3,))
+                ref_right_value = np.zeros((3,))
 
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
@@ -274,26 +310,33 @@ class Dex3_1_Controller:
                             if np.all(np.isclose(right_q_target_prev, 0, atol=1e-6)):
                                 right_q_target_prev = right_q_target
 
-                            # Left hand force control
+                            # Left hand PID control
                             left_force_error = self.target_force - np.max(sensor_data[:6])
                             dt = time.time() - start_time
                             left_adjustment = self.left_pid.compute(left_force_error, dt)
                             left_q_target += left_adjustment
 
-                            # Right hand force control
-                            right_force_error = self.target_force - np.max(sensor_data[6:])
-                            right_adjustment = self.right_pid.compute(right_force_error, dt)
-                            right_q_target += right_adjustment
-
                             left_q_target_prev = left_q_target
-                            right_q_target_prev = right_q_target
                             # Debugging PID adjustments
-                            print(f"[DEBUG] Left adjustment: {left_adjustment}, Right adjustment: {right_adjustment}")
+                            print(f"[DEBUG] Left adjustment: {left_adjustment}")
 
                             self.left_pid.plot_frequency_response()
-                            self.right_pid.plot_frequency_response()
 
+                            # Right hand MPC control
+                            self.x_init.value = np.array(right_hand_state_array[:])  # Current state
+                            self.x_ref.value = np.tile(ref_right_value, (self.mpc_horizon + 1, 1)).T  # Reference trajectory
+                            self.sensor_data = sensor_data[6:]  # Use right-hand sensor data
+                            self.sensor_ref.value = np.full(6, self.target_force)  # Target sensor values
+                            self.mpc_problem.solve()
 
+                            if self.mpc_problem.status == cp.OPTIMAL:
+                                right_q_target = self.u[:, 0].value  # Use the first control input
+                            else:
+                                print("[ERROR] MPC failed to find a solution.")
+                                right_q_target = right_q_target_prev  # Fallback to previous target
+
+                            right_q_target_prev = right_q_target
+                    
                 # get dual hand action
                 action_data = np.concatenate((left_q_target, right_q_target))    
                 if dual_hand_state_array and dual_hand_action_array:
