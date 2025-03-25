@@ -14,6 +14,8 @@ import os
 import sys
 import threading
 from multiprocessing import Process, shared_memory, Array, Lock
+import matplotlib.pyplot as plt
+from scipy import signal
 
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(parent2_dir)
@@ -27,6 +29,52 @@ kTopicDex3LeftCommand = "rt/dex3/left/cmd"
 kTopicDex3RightCommand = "rt/dex3/right/cmd"
 kTopicDex3LeftState = "rt/dex3/left/state"
 kTopicDex3RightState = "rt/dex3/right/state"
+
+
+class PIDController:
+    """PID Controller for force feedback control."""
+    def __init__(self, kp, ki, kd):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.prev_error = 0
+        self.integral = 0
+
+    def compute(self, error, dt):
+        """Compute the PID output."""
+        self.integral += error * dt
+        derivative = (error - self.prev_error) / dt if dt > 0 else 0
+        self.prev_error = error
+        return self.kp * error + self.ki * self.integral + self.kd * derivative
+
+    def plot_frequency_response(self):
+        """Plot the frequency response of the PID controller."""
+        # Create a transfer function for the PID controller
+        num = [self.kd, self.kp, self.ki]
+        den = [1, 0]
+        system = signal.TransferFunction(num, den)
+
+        # Compute the frequency response
+        w, mag, phase = signal.bode(system)
+
+        # Plot magnitude and phase
+        plt.figure(figsize=(10, 6))
+
+        plt.subplot(2, 1, 1)
+        plt.semilogx(w, mag)
+        plt.title("Frequency Response of PID Controller")
+        plt.xlabel("Frequency [rad/s]")
+        plt.ylabel("Magnitude [dB]")
+        plt.grid(which="both", linestyle="--", linewidth=0.5)
+
+        plt.subplot(2, 1, 2)
+        plt.semilogx(w, phase)
+        plt.xlabel("Frequency [rad/s]")
+        plt.ylabel("Phase [degrees]")
+        plt.grid(which="both", linestyle="--", linewidth=0.5)
+
+        plt.tight_layout()
+        plt.show()
 
 
 class Dex3_1_Controller:
@@ -92,6 +140,10 @@ class Dex3_1_Controller:
                                                                           dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, dual_hand_sensor_array))
         hand_control_process.daemon = True
         hand_control_process.start()
+
+        self.left_pid = PIDController(kp=1.0, ki=0, kd=0)  # Left hand PID controller
+        self.right_pid = PIDController(kp=1.0, ki=0, kd=0)  # Right hand PID controller
+        self.target_force = 11 * 10000  # Target force threshold for both hands
 
         print("Initialize Dex3_1_Controller OK!\n")
 
@@ -186,8 +238,6 @@ class Dex3_1_Controller:
             self.right_msg.motor_cmd[id].kp   = kp
             self.right_msg.motor_cmd[id].kd   = kd  
 
-        FORCE_THRESHOLD = 11 # TODO: Need to be adjusted
-        FORCE_THRESHOLD = FORCE_THRESHOLD * 10000
         try:
             while self.running:
                 start_time = time.time()
@@ -212,14 +262,6 @@ class Dex3_1_Controller:
                         with dual_hand_data_lock:
                             sensor_data = np.array(dual_hand_sensor_array[:])
                             print(f"[DEBUG] Sensor data: {sensor_data}")  # Debugging sensor data
-                            # Calculate scaling factor based on force threshold
-                            max_force = np.max(sensor_data)
-                            if max_force > FORCE_THRESHOLD:
-                                scaling_factor = max(0, 1 - (max_force - FORCE_THRESHOLD) / FORCE_THRESHOLD)
-                                print(f"[DEBUG] Force threshold exceeded. Scaling factor: {scaling_factor}")
-                            else:
-                                scaling_factor = 1.0
-                                print(f"[DEBUG] Force below threshold. Scaling factor: {scaling_factor}")
 
                             left_q_target = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
                             right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
@@ -232,12 +274,26 @@ class Dex3_1_Controller:
                             if np.all(np.isclose(right_q_target_prev, 0, atol=1e-6)):
                                 right_q_target_prev = right_q_target
 
-                            # Scale the target positions
-                            left_q_target = scaling_factor * left_q_target + (1 - scaling_factor) * left_q_target_prev
-                            right_q_target = scaling_factor * right_q_target + (1 - scaling_factor) * right_q_target_prev
+                            # Left hand force control
+                            left_force_error = self.target_force - np.max(sensor_data[:6])
+                            dt = time.time() - start_time
+                            left_adjustment = self.left_pid.compute(left_force_error, dt)
+                            left_q_target += left_adjustment
+
+                            # Right hand force control
+                            right_force_error = self.target_force - np.max(sensor_data[6:])
+                            right_adjustment = self.right_pid.compute(right_force_error, dt)
+                            right_q_target += right_adjustment
 
                             left_q_target_prev = left_q_target
                             right_q_target_prev = right_q_target
+                            # Debugging PID adjustments
+                            print(f"[DEBUG] Left adjustment: {left_adjustment}, Right adjustment: {right_adjustment}")
+
+                            self.left_pid.plot_frequency_response()
+                            self.right_pid.plot_frequency_response()
+
+
                 # get dual hand action
                 action_data = np.concatenate((left_q_target, right_q_target))    
                 if dual_hand_state_array and dual_hand_action_array:
